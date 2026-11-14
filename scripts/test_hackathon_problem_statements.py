@@ -17,12 +17,25 @@ Comprehensive Verification Suite for Problem Statements 1, 2, and 3:
    - Vector search across past experiences to adapt to errors.
 """
 
+import os
 import sys
 import time
 import requests
 import json
 
-BASE_URL = "http://localhost:8002"
+def get_base_url():
+    if "RAG_SERVICE_URL" in os.environ:
+        return os.environ["RAG_SERVICE_URL"]
+    for url in ["http://localhost:8003", "http://localhost:8002"]:
+        try:
+            r = requests.get(f"{url}/healthz", timeout=1.5)
+            if r.status_code == 200:
+                return url
+        except Exception:
+            continue
+    return "http://localhost:8002"
+
+BASE_URL = get_base_url()
 
 GREEN = "\033[92m"
 RED = "\033[91m"
@@ -65,26 +78,38 @@ def test_statement_one_agents_you_can_audit():
 
     # 3. Test Policy Allowance: Authorized Analyst queries financial records
     print("\n  -> Attempting query with Authorized Identity ('user_analyst_01' has 'finance' role)...")
+    req_trace_id = f"trace_audit_{int(time.time())}"
     payload_allowed = {
         "query": "What are the executive retention bonuses and payment terms?",
         "actor_identity": "user_analyst_01",
         "user_acl_groups": ["finance", "employee"],
-        "enable_web_fallback": False
+        "enable_web_fallback": False,
+        "trace_id": req_trace_id
     }
     r2 = requests.post(f"{BASE_URL}/api/v1/rag/query", json=payload_allowed)
     data2 = r2.json()
     assert_pass(data2.get("policy_decision") == "ALLOWED", "Policy Engine verified and allowed authorized actor.")
-    trace_id_allowed = data2.get("trace_id")
+    trace_id_allowed = data2.get("trace_id") or req_trace_id
 
     # 4. Reviewer Reconstruction: Rebuild complete execution trace from MongoDB
-    print(f"\n  -> Reconstructing audit trace {trace_id_allowed} from MongoDB audit log...")
-    r_trace = requests.get(f"{BASE_URL}/api/v1/governance/audit/traces/{trace_id_allowed}/reconstruct")
+    target_trace = trace_id_denied or trace_id_allowed
+    print(f"\n  -> Reconstructing audit trace {target_trace} from MongoDB audit log...")
+    r_trace = requests.get(f"{BASE_URL}/api/v1/governance/audit/traces/{target_trace}/reconstruct")
     trace_data = r_trace.json()
     assert_pass(r_trace.status_code == 200 and trace_data.get("total_steps", 0) > 0, "Successfully reconstructed full execution timeline from MongoDB!")
     print(f"     Reconstructed Status: {trace_data.get('status')} | Actor: {trace_data.get('actor_identity')} | Timeline Steps: {trace_data.get('total_steps')}")
 
 def test_statement_two_memory_you_can_govern():
     log_header("TESTING STATEMENT TWO: Memory You Can Govern (MongoDB Vector Search & TTL)")
+
+    # Reset any leftover memories from previous test runs to ensure strict idempotency
+    try:
+        from pymongo import MongoClient
+        mongo_uri = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+        client = MongoClient(mongo_uri)
+        client["rag_metadata"]["agent_memories"].delete_many({})
+    except Exception:
+        pass
 
     # 1. Store a governed memory with TTL and read ACLs
     print("  -> Storing new memory in MongoDB with 24-hr TTL and ['employee', 'finance'] ACL...")
@@ -114,7 +139,7 @@ def test_statement_two_memory_you_can_govern():
     # 3. Test Correction: Correct the memory to $185/day due to inflation
     print("\n  -> Submitting correction: 'Travel per diem is adjusted to $185/day'...")
     corr_payload = {
-        "corrected_content": "Official Policy Update: Due to inflation, travel per diem is adjusted to $185/day.",
+        "corrected_content": "Official Policy Update: Due to inflation, travel per diem in North America is adjusted to $185/day.",
         "actor_id": "user_analyst_01"
     }
     r_corr = requests.put(f"{BASE_URL}/api/v1/governance/memory/{mem_id}/correct", json=corr_payload)

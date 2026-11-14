@@ -260,9 +260,9 @@ async def query_rag(req: QueryRequest):
         rerank_ms = (time.perf_counter() - t_rerank_start) * 1000
 
     # Determine whether local documents are sufficient or if we fall back to public internet
-    # Score threshold: if highest score is < 0.05, local context is irrelevant
+    # Score threshold: if highest score is < 0.05, local context is irrelevant unless governed memories exist
     highest_score = max([float(x.get("score", 0.0)) for x in top_reranked], default=0.0)
-    local_match_found = len(top_reranked) > 0 and highest_score >= 0.05
+    local_match_found = (len(top_reranked) > 0 and highest_score >= 0.05) or (len(retrieved_memories) > 0)
 
     # Case A: Fallback to Public Internet
     if not local_match_found and req.enable_web_fallback:
@@ -317,6 +317,20 @@ async def query_rag(req: QueryRequest):
             answer_text = f"[PUBLIC INTERNET FALLBACK]: No local documents matched. Query routed to internet fallback. (LLM note: {e})"
 
         total_ms = (time.perf_counter() - t0) * 1000
+
+        governance_engine.record_audit_step(
+            trace_id=trace_id,
+            step_index=1,
+            actor_id=req.actor_identity,
+            action="rag:query",
+            target_resource="public_web",
+            policy_eval=(True, "POL_ALLOW_DEFAULT", "Query permitted; routed to public internet fallback"),
+            inputs={"query": req.query, "acls": req.user_acl_groups},
+            citations_used=[{"file": c.filename, "page": c.page_number, "score": c.score} for c in citations],
+            llm_reasoning="Synthesized response via public internet fallback.",
+            output_summary=answer_text[:250]
+        )
+
         return QueryResponse(
             answer=answer_text,
             source_type="public_internet",
@@ -324,12 +338,29 @@ async def query_rag(req: QueryRequest):
             citations=citations,
             retrieval_latency_ms=round(retrieval_ms, 2),
             rerank_latency_ms=round(rerank_ms, 2),
-            total_latency_ms=round(total_ms, 2)
+            total_latency_ms=round(total_ms, 2),
+            trace_id=trace_id,
+            policy_decision="ALLOWED",
+            governed_memories_used=retrieved_memories
         )
 
     # Case B: No local documents and web fallback is disabled
     if not local_match_found:
         total_ms = (time.perf_counter() - t0) * 1000
+
+        governance_engine.record_audit_step(
+            trace_id=trace_id,
+            step_index=1,
+            actor_id=req.actor_identity,
+            action="rag:query",
+            target_resource="rag_documents",
+            policy_eval=(True, "POL_ALLOW_DEFAULT", "Query permitted by policy; no matching documents in repository"),
+            inputs={"query": req.query, "acls": req.user_acl_groups},
+            citations_used=[],
+            llm_reasoning="No local document matches found.",
+            output_summary="No matching documents found"
+        )
+
         return QueryResponse(
             answer="No relevant documents found for your query matching your access permissions in the local repository.",
             source_type="none",
@@ -337,10 +368,13 @@ async def query_rag(req: QueryRequest):
             citations=[],
             retrieval_latency_ms=round(retrieval_ms, 2),
             rerank_latency_ms=round(rerank_ms, 2),
-            total_latency_ms=round(total_ms, 2)
+            total_latency_ms=round(total_ms, 2),
+            trace_id=trace_id,
+            policy_decision="ALLOWED",
+            governed_memories_used=retrieved_memories
         )
 
-    # Case C: Local Documents Found -> 100% Grounded, Bypasses Public Internet!
+    # Case C: Local Documents or Governed Memories Found -> 100% Grounded, Bypasses Public Internet!
     citations = []
     context_blocks = []
     for rank_idx, item in enumerate(top_reranked, 1):
@@ -358,16 +392,26 @@ async def query_rag(req: QueryRequest):
             f"[Source {rank_idx} | File: {cit.filename} | Page: {cit.page_number}]:\n{cit.text}"
         )
 
-    context_str = "\n\n".join(context_blocks)
-
     memory_context_str = ""
     if retrieved_memories:
         mem_lines = [f"[Governed Memory v{m['version']} | ACL: {m['read_acl']}]: {m['content']}" for m in retrieved_memories]
         memory_context_str = "Governed Past Memories & User Corrections (Retrieved from MongoDB):\n" + "\n".join(mem_lines) + "\n\n"
+        if not citations:
+            for idx, m in enumerate(retrieved_memories, 1):
+                citations.append(Citation(
+                    doc_id=m["memory_id"],
+                    filename=f"MongoDB Governed Memory (v{m['version']})",
+                    page_number=1,
+                    chunk_index=idx,
+                    score=round(float(m.get("similarity", 1.0)), 4),
+                    text=m["content"]
+                ))
+
+    context_str = "\n\n".join(context_blocks) if context_blocks else "No file passages; grounded strictly on governed memory policies."
 
     system_prompt = (
-        "You are an enterprise assistant. Answer the user question strictly using the provided internal context passages below.\n"
-        "Cite the sources with [Source X | File: <filename> | Page: <page>] inline after statements.\n"
+        "You are an enterprise assistant. Answer the user question strictly using the provided internal context passages and governed memories below.\n"
+        "Cite the sources with [Source X | File: <filename> | Page: <page>] or [Governed Memory vX] inline after statements.\n"
         "If governed past memories or corrections apply, incorporate them respectfully into your reasoning.\n"
         "Do not invent facts not present in the documents. Public internet was NOT used for this response."
     )
