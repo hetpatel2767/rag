@@ -1,0 +1,31 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: parser-worker-scaler
+  namespace: local-rag
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: parser-worker
+  minReplicaCount: 0
+  maxReplicaCount: 4
+  cooldownPeriod: 30
+  pollingInterval: 10
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: redpanda.local-rag.svc.cluster.local:9092
+        consumerGroup: rag-parser-group
+        topic: doc-ingest-realtime
+        lagThreshold: "5"
+        activationLagThreshold: "1"
+        offsetResetPolicy: earliest
+    - type: kafka
+      metadata:
+        bootstrapServers: redpanda.local-rag.svc.cluster.local:9092
+        consumerGroup: rag-parser-group
+        topic: doc-ingest-bulk
+        lagThreshold: "20"
+        activationLagThreshold: "1"
+        offsetResetPolicy: earliest

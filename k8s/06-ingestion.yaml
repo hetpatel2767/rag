@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingestion-api
+  namespace: local-rag
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingestion-api
+  template:
+    metadata:
+      labels:
+        app: ingestion-api
+    spec:
+      containers:
+        - name: ingestion-api
+          image: local-rag/ingestion:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: MINIO_ENDPOINT
+              value: "minio:9000"
+            - name: MINIO_ACCESS_KEY
+              value: "minioadmin"
+            - name: MINIO_SECRET_KEY
+              value: "minioadmin"
+            - name: MINIO_BUCKET
+              value: "raw-documents"
+            - name: MONGO_URI
+              value: "mongodb://mongodb:27017"
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "redpanda.local-rag.svc.cluster.local:9092"
+            - name: TOPIC_REALTIME
+              value: "doc-ingest-realtime"
+            - name: TOPIC_BULK
+              value: "doc-ingest-bulk"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingestion-api
+  namespace: local-rag
+spec:
+  type: ClusterIP
+  selector:
+    app: ingestion-api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

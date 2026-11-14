@@ -1,0 +1,130 @@
+services:
+  # 1. Object Storage (MinIO) - S3 Claim-Check Store (Chainguard verified public image)
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    container_name: rag-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+
+  # 2. Event Bus - Redpanda (Ultra-lightweight C++ Kafka compatible, <400MB RAM)
+  redpanda:
+    image: redpandadata/redpanda:latest
+    container_name: rag-redpanda
+    command:
+      - redpanda
+      - start
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+      - --smp 1
+      - --memory 512M
+      - --overprovisioned
+      - --mode dev-container
+    ports:
+      - "19092:19092"
+      - "9644:9644"
+
+  # 3. Document Metadata & State Store - MongoDB
+  mongodb:
+    image: mongo:7.0
+    container_name: rag-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  # 4. Open-Source Vector DB - Qdrant (Dense HNSW + Sparse BM25 + Payload Filter)
+  qdrant:
+    image: qdrant/qdrant:v1.12.1
+    container_name: rag-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  # 5. Local LLM Generation - Ollama (Small weight model: Qwen2.5-3B or Llama-3.2-3B)
+  # Uses GPU passthrough for 6GB VRAM budget
+  ollama:
+    image: ollama/ollama:latest
+    container_name: rag-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # 6. Top Lane: Ingestion Service
+  ingestion-service:
+    build:
+      context: ./services/ingestion
+    container_name: rag-ingestion
+    ports:
+      - "8000:8000"
+    environment:
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: raw-documents
+      MONGO_URI: mongodb://mongodb:27017
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+    depends_on:
+      - minio
+      - redpanda
+      - mongodb
+
+  # 7. Stateless Worker (Parser + PII Redaction + Embedder + Qdrant Upsert)
+  parser-worker:
+    build:
+      context: ./services/worker
+    container_name: rag-worker
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MONGO_URI: mongodb://mongodb:27017
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+    depends_on:
+      - redpanda
+      - minio
+      - mongodb
+      - qdrant
+
+  # 8. Bottom Lane: Hybrid Retrieval & Generation API
+  retrieval-service:
+    build:
+      context: ./services/retrieval
+    container_name: rag-retrieval
+    ports:
+      - "8002:8000"
+    environment:
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: 6333
+      MONGO_URI: mongodb://mongodb:27017
+      OLLAMA_BASE_URL: http://ollama:11434
+      LLM_MODEL: qwen2.5:3b
+      INGESTION_SERVICE_URL: http://ingestion-service:8000
+    depends_on:
+      - qdrant
+      - mongodb
+      - ollama
+
+volumes:
+  minio_data:
+  mongo_data:
+  qdrant_data:
+  ollama_models:

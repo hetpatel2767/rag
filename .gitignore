@@ -1,0 +1,94 @@
+# ==============================================================================
+# Git Ignore for Local Enterprise RAG System
+# ==============================================================================
+
+# Python Bytecode & Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Testing & Quality Tools
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+
+# Local Model Weights, Vector DB & Object Storage Data
+.fastembed_cache/
+models/
+*.onnx
+*.bin
+*.safetensors
+*.gguf
+minio_data/
+mongo_data/
+qdrant_data/
+ollama_models/
+
+# Sensitive Configuration & Environment Variables
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.cert
+*.crt
+
+# Kubernetes & Local Cluster State
+.minikube/
+.kube/
+kubeconfig
+*.kubeconfig
+
+# IDE & Editor Files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# Operating System Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs & Temporary Files
+*.log
+logs/
+tmp/
+*.tmp

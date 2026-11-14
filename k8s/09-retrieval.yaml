@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: retrieval-api
+  namespace: local-rag
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: retrieval-api
+  template:
+    metadata:
+      labels:
+        app: retrieval-api
+    spec:
+      containers:
+        - name: retrieval-api
+          image: local-rag/retrieval:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: QDRANT_HOST
+              value: "qdrant"
+            - name: QDRANT_PORT
+              value: "6333"
+            - name: MONGO_URI
+              value: "mongodb://mongodb:27017"
+            - name: OLLAMA_BASE_URL
+              value: "http://ollama:11434"
+            - name: LLM_MODEL
+              value: "qwen2.5:3b"
+            - name: INGESTION_SERVICE_URL
+              value: "http://ingestion-api:8000"
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: retrieval-api
+  namespace: local-rag
+spec:
+  type: ClusterIP
+  selector:
+    app: retrieval-api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
