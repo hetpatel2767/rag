@@ -143,8 +143,40 @@ class DurableTaskEngine:
     def query_past_experience(self, error_description: str, top_k: int = 1) -> List[Dict[str, Any]]:
         """
         Vector search across past task experiences in MongoDB to resolve unexpected runtime issues.
+        Supports native MongoDB Atlas Vector Search ($vectorSearch) with automatic local fallback.
         """
         q_vec = np.array(list(self.embed_fn([error_description]))[0])
+
+        # 1. Attempt Native MongoDB Atlas Vector Search
+        try:
+            pipeline = [
+                {
+                    "$vectorSearch": {
+                        "index": "experience_index",
+                        "path": "vector",
+                        "queryVector": q_vec.tolist(),
+                        "numCandidates": 20,
+                        "limit": top_k
+                    }
+                },
+                {
+                    "$project": {
+                        "_id": 0,
+                        "problem": 1,
+                        "solution": 1,
+                        "system": 1,
+                        "similarity": {"$meta": "vectorSearchScore"}
+                    }
+                }
+            ]
+            results = list(self.experiences.aggregate(pipeline))
+            if results:
+                return results
+        except Exception:
+            # Fall back to local in-memory cosine ranking
+            pass
+
+        # 2. Local Fallback
         experiences = list(self.experiences.find({}, {"_id": 0}))
         if not experiences:
             return []

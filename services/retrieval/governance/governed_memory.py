@@ -141,11 +141,59 @@ class GovernedMemoryEngine:
     ) -> List[Dict[str, Any]]:
         """
         Vector search across memories governed by read ACLs and active status.
-        Uses cosine vector similarity scoring over active MongoDB memory vectors.
+        Supports native MongoDB Atlas Vector Search ($vectorSearch) with automatic
+        fallback to local cosine ranking for local MongoDB deployments.
         """
         query_vector = np.array(list(self.embed_fn([query]))[0])
 
-        # Filter strictly by active status and read_acl intersection
+        # 1. Attempt Native MongoDB Atlas Vector Search ($vectorSearch aggregation)
+        try:
+            pipeline = [
+                {
+                    "$vectorSearch": {
+                        "index": "vector_index",
+                        "path": "vector",
+                        "queryVector": query_vector.tolist(),
+                        "numCandidates": 50,
+                        "limit": top_k * 2,
+                        "filter": {
+                            "status": "active",
+                            "read_acl": {"$in": user_roles}
+                        }
+                    }
+                },
+                {
+                    "$project": {
+                        "_id": 0,
+                        "memory_id": 1,
+                        "content": 1,
+                        "version": 1,
+                        "read_acl": 1,
+                        "created_at": 1,
+                        "expires_at": 1,
+                        "similarity": {"$meta": "vectorSearchScore"}
+                    }
+                }
+            ]
+            results = list(self.memories.aggregate(pipeline))
+            if results:
+                formatted = []
+                for r in results:
+                    formatted.append({
+                        "memory_id": r["memory_id"],
+                        "content": r["content"],
+                        "version": r["version"],
+                        "read_acl": r["read_acl"],
+                        "similarity": round(float(r.get("similarity", 1.0)), 4),
+                        "created_at": r["created_at"].isoformat() if isinstance(r.get("created_at"), datetime) else str(r.get("created_at")),
+                        "expires_at": r["expires_at"].isoformat() if isinstance(r.get("expires_at"), datetime) else str(r.get("expires_at"))
+                    })
+                return formatted[:top_k]
+        except Exception:
+            # Fall back to local in-memory cosine ranking when running against local MongoDB
+            pass
+
+        # 2. Local Fallback: Filter strictly by active status and read_acl intersection
         query_filter = {
             "status": "active",
             "read_acl": {"$in": user_roles}
@@ -159,7 +207,7 @@ class GovernedMemoryEngine:
             cand_vec = np.array(cand["vector"])
             norm = (np.linalg.norm(query_vector) * np.linalg.norm(cand_vec))
             sim = float(np.dot(query_vector, cand_vec) / norm) if norm > 0 else 0.0
-            if sim > 0.4:  # Relevance threshold
+            if sim > 0.3:  # Relevance threshold
                 scored.append({
                     "memory_id": cand["memory_id"],
                     "content": cand["content"],
