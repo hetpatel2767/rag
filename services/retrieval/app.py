@@ -56,14 +56,25 @@ sparse_model = SparseTextEmbedding(model_name="Qdrant/bm25")
 logger.info("Initializing FlashRank local cross-encoder reranker...")
 reranker = Ranker(model_name="ms-marco-MiniLM-L-12-v2")
 
+# Initialize MongoDB Hackathon Governance Engines (Statements 1, 2, 3)
+from governance.identity_policy import IdentityPolicyEngine
+from governance.governed_memory import GovernedMemoryEngine
+from governance.durable_tasks import DurableTaskEngine
+
+governance_engine = IdentityPolicyEngine(db)
+memory_engine = GovernedMemoryEngine(db, embed_fn=dense_model.embed)
+task_engine = DurableTaskEngine(db, embed_fn=dense_model.embed)
+
 class QueryRequest(BaseModel):
     query: str
     tenant_id: str = "default_tenant"
+    actor_identity: str = "user_analyst_01"  # Statement One
     user_acl_groups: List[str] = ["public", "engineering", "exec"]
     top_k_candidates: int = 50
     rerank_top_n: int = 5
     enable_web_fallback: bool = True
     stream: bool = False
+    trace_id: Optional[str] = None
 
 class Citation(BaseModel):
     doc_id: str
@@ -75,12 +86,15 @@ class Citation(BaseModel):
 
 class QueryResponse(BaseModel):
     answer: str
-    source_type: str  # 'local_knowledge_base' or 'public_internet' or 'none'
+    source_type: str  # 'local_knowledge_base' or 'public_internet' or 'policy_block' or 'none'
     web_fallback_used: bool = False
     citations: List[Citation]
     retrieval_latency_ms: float
     rerank_latency_ms: float
     total_latency_ms: float
+    trace_id: Optional[str] = None
+    policy_decision: str = "ALLOWED"
+    governed_memories_used: List[Dict[str, Any]] = []
 
 async def search_public_web(query: str) -> List[Dict[str, str]]:
     """
@@ -148,6 +162,49 @@ def build_acl_filter(tenant_id: str, acl_groups: List[str]) -> models.Filter:
 @app.post("/api/v1/rag/query", response_model=QueryResponse)
 async def query_rag(req: QueryRequest):
     t0 = time.perf_counter()
+    import uuid
+
+    trace_id = req.trace_id or str(uuid.uuid4())
+    primary_acl = req.user_acl_groups[0] if req.user_acl_groups else "public"
+
+    # Statement One: Pre-Execution Policy Enforcement via MongoDB
+    is_allowed, pol_id, pol_reason = governance_engine.evaluate_policy(
+        actor_id=req.actor_identity,
+        action="rag:query",
+        resource_context={"target_acl_group": primary_acl}
+    )
+    if not is_allowed:
+        governance_engine.record_audit_step(
+            trace_id=trace_id,
+            step_index=1,
+            actor_id=req.actor_identity,
+            action="rag:query",
+            target_resource="rag_documents",
+            policy_eval=(False, pol_id, pol_reason),
+            inputs={"query": req.query, "acls": req.user_acl_groups},
+            citations_used=[],
+            llm_reasoning="Action preemptively blocked by MongoDB identity policy layer before execution.",
+            output_summary="Access Denied"
+        )
+        return QueryResponse(
+            answer=f"[POLICY BLOCKED]: {pol_reason}",
+            source_type="policy_block",
+            web_fallback_used=False,
+            citations=[],
+            retrieval_latency_ms=0.0,
+            rerank_latency_ms=0.0,
+            total_latency_ms=round((time.perf_counter() - t0) * 1000, 2),
+            trace_id=trace_id,
+            policy_decision="DENIED",
+            governed_memories_used=[]
+        )
+
+    # Statement Two: Retrieve Governed Memories from MongoDB
+    retrieved_memories = memory_engine.retrieve_governed_memories(
+        query=req.query,
+        user_roles=req.user_acl_groups,
+        top_k=2
+    )
 
     # 1. Embed query (Dense + Sparse)
     query_dense = list(dense_model.embed([req.query]))[0].tolist()
@@ -303,12 +360,18 @@ async def query_rag(req: QueryRequest):
 
     context_str = "\n\n".join(context_blocks)
 
+    memory_context_str = ""
+    if retrieved_memories:
+        mem_lines = [f"[Governed Memory v{m['version']} | ACL: {m['read_acl']}]: {m['content']}" for m in retrieved_memories]
+        memory_context_str = "Governed Past Memories & User Corrections (Retrieved from MongoDB):\n" + "\n".join(mem_lines) + "\n\n"
+
     system_prompt = (
         "You are an enterprise assistant. Answer the user question strictly using the provided internal context passages below.\n"
         "Cite the sources with [Source X | File: <filename> | Page: <page>] inline after statements.\n"
+        "If governed past memories or corrections apply, incorporate them respectfully into your reasoning.\n"
         "Do not invent facts not present in the documents. Public internet was NOT used for this response."
     )
-    user_prompt = f"Internal Context Passages:\n{context_str}\n\nQuestion: {req.query}\nAnswer:"
+    user_prompt = f"{memory_context_str}Internal Context Passages:\n{context_str}\n\nQuestion: {req.query}\nAnswer:"
 
     llm_payload = {
         "model": LLM_MODEL,
@@ -334,6 +397,20 @@ async def query_rag(req: QueryRequest):
 
     total_ms = (time.perf_counter() - t0) * 1000
 
+    # Statement One: Record Replay Audit Step in MongoDB
+    governance_engine.record_audit_step(
+        trace_id=trace_id,
+        step_index=1,
+        actor_id=req.actor_identity,
+        action="rag:query",
+        target_resource="rag_documents",
+        policy_eval=(True, "POL_ALLOW_DEFAULT", "Query verified by MongoDB policy engine"),
+        inputs={"query": req.query, "acls": req.user_acl_groups},
+        citations_used=[{"file": c.filename, "page": c.page_number, "score": c.score} for c in citations],
+        llm_reasoning=f"Answered with {len(citations)} citations and {len(retrieved_memories)} active governed memories.",
+        output_summary=answer_text[:250]
+    )
+
     metrics_col.insert_one({
         "query": req.query,
         "tenant_id": req.tenant_id,
@@ -353,7 +430,10 @@ async def query_rag(req: QueryRequest):
         citations=citations,
         retrieval_latency_ms=round(retrieval_ms, 2),
         rerank_latency_ms=round(rerank_ms, 2),
-        total_latency_ms=round(total_ms, 2)
+        total_latency_ms=round(total_ms, 2),
+        trace_id=trace_id,
+        policy_decision="ALLOWED",
+        governed_memories_used=retrieved_memories
     )
 
 # -------------------------------------------------------------
@@ -779,6 +859,137 @@ async def trigger_batch_docs():
                     continue
 
     return {"status": "ok", "dispatched_count": dispatched, "total_files": len(files)}
+
+# =============================================================
+# MongoDB Hackathon: Agents in Context - Problem Statement APIs
+# =============================================================
+
+# --- Statement One: Agents You Can Audit ---
+@app.get("/api/v1/governance/identities")
+def list_identities():
+    """List all registered user and agent identities in MongoDB."""
+    return list(db["identities"].find({}, {"_id": 0}))
+
+@app.post("/api/v1/governance/identities")
+def create_identity(identity: Dict[str, Any]):
+    """Register or update an identity in MongoDB."""
+    ident_id = governance_engine.register_identity(identity)
+    return {"status": "ok", "identity_id": ident_id}
+
+@app.get("/api/v1/governance/policies")
+def list_policies():
+    """List all active governance policies stored in MongoDB."""
+    return list(db["policies"].find({}, {"_id": 0}))
+
+@app.post("/api/v1/governance/policies")
+def create_policy(policy: Dict[str, Any]):
+    """Register a new policy rule in MongoDB."""
+    db["policies"].update_one({"policy_id": policy["policy_id"]}, {"$set": policy}, upsert=True)
+    return {"status": "ok", "policy_id": policy["policy_id"]}
+
+@app.get("/api/v1/governance/audit/traces")
+def list_audit_traces(limit: int = 20):
+    """List recent audit logs from MongoDB."""
+    logs = list(db["audit_logs"].find({}, {"_id": 0}).sort("timestamp", -1).limit(limit))
+    return logs
+
+@app.get("/api/v1/governance/audit/traces/{trace_id}/reconstruct")
+def reconstruct_trace(trace_id: str):
+    """Reviewer Reconstruction API: Rebuilds complete execution trace from MongoDB."""
+    return governance_engine.reconstruct_trace(trace_id)
+
+
+# --- Statement Two: Memory You Can Govern ---
+class StoreMemoryRequest(BaseModel):
+    agent_id: str = "agent_rag_copilot"
+    content: str
+    read_acl: List[str] = ["employee", "finance"]
+    ttl_seconds: Optional[int] = 86400  # 24 hour TTL by default
+    memory_type: str = "factual_correction"
+
+class CorrectMemoryRequest(BaseModel):
+    corrected_content: str
+    actor_id: str = "user_analyst_01"
+
+@app.post("/api/v1/governance/memory/store")
+def store_governed_memory(req: StoreMemoryRequest):
+    """Persist a memory in MongoDB with explicit read access rules and TTL expiration."""
+    doc = memory_engine.store_memory(
+        agent_id=req.agent_id,
+        content=req.content,
+        read_acl=req.read_acl,
+        ttl_seconds=req.ttl_seconds,
+        memory_type=req.memory_type
+    )
+    return doc
+
+@app.get("/api/v1/governance/memory/list")
+def list_governed_memories():
+    """List all governed memories from MongoDB (including active, superseded, forgotten)."""
+    return list(db["agent_memories"].find({}, {"_id": 0, "vector": 0}).sort("created_at", -1))
+
+@app.put("/api/v1/governance/memory/{memory_id}/correct")
+def correct_governed_memory(memory_id: str, req: CorrectMemoryRequest):
+    """Correct an existing memory, creating a new version and superseding the previous."""
+    try:
+        new_mem = memory_engine.correct_memory(memory_id, req.corrected_content, req.actor_id)
+        return new_mem
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.delete("/api/v1/governance/memory/{memory_id}/forget")
+def forget_governed_memory(memory_id: str, actor_id: str = "user_analyst_01"):
+    """Tombstone / forget a memory so the agent never retrieves it again."""
+    success = memory_engine.forget_memory(memory_id, actor_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Memory not found")
+    return {"status": "forgotten", "memory_id": memory_id}
+
+
+# --- Statement Three: Finish the Job ---
+class CreateTaskRequest(BaseModel):
+    task_name: str
+    steps: List[Dict[str, Any]]
+    context: Dict[str, Any] = {}
+
+class StepAdvanceRequest(BaseModel):
+    step_output: Dict[str, Any]
+
+@app.post("/api/v1/governance/tasks/create")
+def create_durable_task(req: CreateTaskRequest):
+    """Initialize a durable multi-step task with verified state in MongoDB."""
+    task_id = task_engine.create_task(req.task_name, req.steps, req.context)
+    return {"status": "QUEUED", "task_id": task_id}
+
+@app.post("/api/v1/governance/tasks/{task_id}/step")
+def advance_task_step(task_id: str, req: StepAdvanceRequest):
+    """Execute and checkpoint a step in MongoDB so state survives crashes."""
+    try:
+        return task_engine.advance_step(task_id, req.step_output)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.post("/api/v1/governance/tasks/{task_id}/resume")
+def resume_task_after_crash(task_id: str):
+    """Crash recovery: Resume task strictly from last verified MongoDB checkpoint."""
+    try:
+        return task_engine.recover_and_resume(task_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+@app.get("/api/v1/governance/tasks/{task_id}")
+def get_task_details(task_id: str):
+    """Get full state and step checkpoints for a durable task from MongoDB."""
+    task = db["durable_tasks"].find_one({"task_id": task_id}, {"_id": 0})
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+@app.post("/api/v1/governance/tasks/resolve-error")
+def resolve_error_with_past_experience(error_query: Dict[str, str]):
+    """Query MongoDB Vector Search over past experiences to adapt to system changes or errors."""
+    q = error_query.get("error_description", "")
+    return task_engine.query_past_experience(q)
 
 @app.get("/healthz")
 def healthz():

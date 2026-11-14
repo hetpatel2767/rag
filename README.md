@@ -190,6 +190,38 @@ make test
 
 # 5. Run the batch generation & KEDA scaling benchmark (20 enterprise docs)
 make test-batch
+
+# 6. Run the MongoDB Hackathon Problem Statement verification suite (Statements 1, 2 & 3)
+make test-hackathon
+```
+
+---
+
+## 6. MongoDB Hackathon: Agents in Context Track
+
+This repository provides full out-of-the-box implementations for all three hackathon problem statements:
+
+### 🛡️ Statement One: Agents You Can Audit
+- **Identity & Policy in MongoDB:** Identities (`user_analyst_01`, `agent_rag_copilot`) and governance policies are stored directly in MongoDB collections.
+- **Pre-Execution Gate:** Every action evaluates active MongoDB policies *before* execution. Unauthorized actors are blocked immediately with zero leakage.
+- **Reconstructable Audit Trail:** Tamper-evident SHA-256 step hashes are written to `audit_logs`. An auditor can invoke `GET /api/v1/governance/audit/traces/{trace_id}/reconstruct` to replay the exact reasoning, citations, and policy decisions.
+
+### 🧠 Statement Two: Memory You Can Govern
+- **Governed Memory Store (`agent_memories`):** Stores episodic and factual memories alongside dense vector embeddings.
+- **Access & Retention Rules:**
+  - **Who can read:** Filtered by `read_acl` tags.
+  - **How long it lives:** Native MongoDB **TTL Index** (`expireAfterSeconds: 0`) purges expired memories automatically.
+  - **Correction Lifecycle:** Updating a memory supersedes the old version, incrementing version numbers so the agent's behavior changes on subsequent runs.
+  - **Right to be Forgotten:** Dedicated `/forget` endpoint tombstones records for compliance.
+
+### ⚡ Statement Three: Finish the Job
+- **Durable Task Checkpoints (`durable_tasks`):** Orchestrates multi-step workflows across systems (MinIO, Qdrant, ERPs) with verified state snapshots in MongoDB.
+- **Crash Recovery & Resume:** If the worker or container crashes mid-task, calling `/resume` queries MongoDB for the last verified checkpoint and resumes execution without re-running finished steps.
+- **Experience Vector Search (`task_experiences`):** If unexpected system errors occur, vector search retrieves past solutions to autonomously adapt.
+
+Run the automated verification suite:
+```bash
+make test-hackathon
 ```
 
 ---

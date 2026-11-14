@@ -8,6 +8,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
+COPY governance ./governance
 COPY batch_test_docs ./batch_test_docs
 
 EXPOSE 8000

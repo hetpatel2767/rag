@@ -56,3 +56,27 @@ flowchart TD
    KEDA polls Redpanda every 10 seconds. When consumer lag on `doc-ingest-realtime` exceeds 5 messages, KEDA scales parser pods from 0 up to 4 replicas. When the queue is drained, pods scale back to 0 to conserve CPU and RAM.
 4. **Resilience & DLQ:**  
    Corrupt or unreadable files retry 3 times with exponential backoff before being forwarded to `doc-ingest-dlq`. The Kafka partition is never blocked.
+
+---
+
+## 4. MongoDB Hackathon: Agents in Context Problem Statements
+
+This architecture natively implements all three Problem Statements from the MongoDB Toronto Hackathon:
+
+### Statement One: Agents You Can Audit
+- **MongoDB as Identity & Policy Layer:** Collections `identities` and `policies` govern access permissions, clearance levels, and operational bounds before any tool or query executes.
+- **Pre-Execution Policy Check (PEP):** Every query evaluates policies in MongoDB (`evaluate_policy`). If unauthorized, it is blocked preemptively without touching model weights.
+- **Reviewer Reconstructability:** Every action logs a tamper-evident audit record (`audit_logs`) with inputs, reasoning traces, policy IDs, and citations. The `/api/v1/governance/audit/traces/{trace_id}/reconstruct` endpoint allows an auditor to replay and reconstruct the full timeline.
+
+### Statement Two: Memory You Can Govern
+- **Governed Memory Store:** The `agent_memories` collection persists episodic facts, corrections, and user instructions with vector embeddings.
+- **Access & Retention Rules:**
+  - **Who can read:** Enforced via `read_acl` tags filtered at retrieval time.
+  - **How long it lives:** Native MongoDB **TTL Index** (`createIndex({ expires_at: 1 }, { expireAfterSeconds: 0 })`) automatically purges expired memories.
+  - **Correction Lifecycle:** `/api/v1/governance/memory/{id}/correct` supersedes the old version, incrementing version numbers so the agent's behavior dynamically changes on the next run.
+  - **Right to be Forgotten:** `/api/v1/governance/memory/{id}/forget` tombstones the memory so it is immediately omitted from vector search.
+
+### Statement Three: Finish the Job
+- **Durable Task Checkpoints:** Collection `durable_tasks` records multi-step agent workflows across disparate systems (MinIO, Qdrant, ERPs).
+- **Crash Recovery & Resume:** If a pod crashes or restarts mid-workflow, `/api/v1/governance/tasks/{id}/resume` reads verified state from MongoDB and resumes execution strictly from the last verified checkpoint without repeating work.
+- **Experience Vector Search:** When unexpected errors occur, the agent vector-searches `task_experiences` in MongoDB to retrieve past solutions and autonomously adapt.

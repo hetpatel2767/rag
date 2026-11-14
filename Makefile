@@ -68,6 +68,9 @@ test: ## Run end-to-end integration test (claim check, deduplication, PII, ACL q
 test-batch: ## Run 20-file batch ingestion and observe KEDA autoscaling 0->4 pods
 	python3 scripts/batch_upload_test.py
 
+test-hackathon: ## Run verification for all 3 MongoDB Hackathon problem statements
+	python3 scripts/test_hackathon_problem_statements.py
+
 eval: ## Run automated RAG evaluation quality gate (Recall@5 & faithfulness)
 	python3 services/eval/eval.py
 
