@@ -116,8 +116,30 @@ class IdentityPolicyEngine:
         if deny_policy:
             return False, deny_policy["policy_id"], f"Action blocked by policy: {deny_policy['name']}"
 
-        # Check required clearance for resource access
+        # 1. Statement One: Financial Clearance Gate (Intent & Role Enforcement)
+        # Financial topics (bonuses, compensation, salaries, severance, etc.) strictly require 'finance' role.
+        # Unauthorized actors (e.g. contractors) cannot bypass this simply by altering user_acl_groups.
+        query_text = (resource_context.get("query") or "").lower()
+        user_acls = resource_context.get("user_acl_groups") or []
         target_acl = resource_context.get("target_acl_group")
+
+        financial_keywords = [
+            "bonus", "retention", "compensation", "salary", "severance",
+            "payroll", "financial", "payment term", "invoices", "card on file"
+        ]
+        is_financial_query = (
+            any(kw in query_text for kw in financial_keywords)
+            or ("finance" in user_acls)
+            or (target_acl == "finance")
+        )
+        if is_financial_query and "finance" not in actor_roles and "admin" not in actor_roles:
+            return (
+                False,
+                "pol_finance_clearance_gate",
+                f"Policy 'pol_finance_clearance_gate' DENIED: Identity '{actor_id}' lacks mandatory 'finance' clearance role for financial/compensation queries."
+            )
+
+        # 2. General Clearance Validation
         if target_acl and target_acl != "public":
             if target_acl not in actor_roles and "admin" not in actor_roles:
                 return False, "pol_finance_clearance_gate", f"Identity '{actor_id}' lacks required role '{target_acl}'"

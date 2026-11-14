@@ -171,7 +171,11 @@ async def query_rag(req: QueryRequest):
     is_allowed, pol_id, pol_reason = governance_engine.evaluate_policy(
         actor_id=req.actor_identity,
         action="rag:query",
-        resource_context={"target_acl_group": primary_acl}
+        resource_context={
+            "query": req.query,
+            "user_acl_groups": req.user_acl_groups,
+            "target_acl_group": primary_acl
+        }
     )
     if not is_allowed:
         governance_engine.record_audit_step(
